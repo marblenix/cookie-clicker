@@ -1,0 +1,30 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+indent_size = 4
+indent_style = space
+insert_final_newline = true
+max_line_length = 120
+tab_width = 4
+trim_trailing_whitespace = true
+ij_any_keep_blank_lines_in_code = 1
+ij_continuation_indent_size = 8
+
+[.editorconfig]
+ij_editorconfig_align_group_field_declarations = false
+ij_editorconfig_space_after_colon = true
+ij_editorconfig_space_after_comma = true
+ij_editorconfig_space_before_colon = true
+ij_editorconfig_space_before_comma = true
+ij_editorconfig_spaces_around_assignment_operators = true
+
+[{.gitignore, .gitattributes, .gitmodules}]
+indent_size = 16
+indent_style = tab
+
+[{*.cjs,*.js}]
+indent_size = 2
+tab_width = 2
+ij_continuation_indent_size = 2
