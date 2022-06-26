@@ -15,10 +15,11 @@
 // @grant        none
 // ==/UserScript==
 
-(function () {
+(() => {
   'use strict';
 
-  const moduleName = GM_info.script.name.replaceAll(" ", "");
+  const moduleName = GM_info.script.name;
+  const moduleToken = moduleName.replaceAll(" ", "");
   const capitalize = word => word.charAt(0).toUpperCase() + word.slice(1);
   const clone = x => JSON.parse(JSON.stringify(x));
   const doc = {
@@ -57,237 +58,342 @@
   let changedConfigs = {};
   Object.assign(configs, defaultConfigs);
 
-  const start = function () {
-    class Garden {
-      static
-      get minigame() {
-        return Game.Objects.Farm.minigame;
-      }
+  const init = () => {
+    Game.registerMod(GM_info.script.name, {
+      init: start,
+      save: saveConfigs,
+      load: loadConfigs,
+    });
+  };
 
-      static
-      get isActive() {
-        return this.minigame !== undefined;
-      }
+  const checkGameState = () => {
+    if (Game === undefined || !Game.ready) {
+      return false
+    } else {
+      clearInterval(interval);
+      init();
+      return true;
+    }
+  };
 
-      static
-      get CpSMult() {
-        let res = 1;
-        // eslint-disable-next-line no-restricted-syntax
-        for (const key in Game.buffs) {
-          if (typeof Game.buffs[key].multCpS !== 'undefined') {
-            res *= Game.buffs[key].multCpS;
+  const start = () => {
+    if (Garden.isActive) {
+      Main.init();
+    } else {
+      const msg = "You don't have a garden yet. This mod won't work without it!";
+      console.log(msg);
+      UI.createWarning(msg);
+    }
+  }
+
+  const saveConfigs = () => {
+    Object.assign(configs, changedConfigs);
+    return JSON.stringify(changedConfigs);
+  };
+
+  const loadConfigs = saveString => {
+    changedConfigs = JSON.parse(saveString);
+    Object.assign(configs, changedConfigs);
+  };
+
+  class Main {
+    static init() {
+      this.timerInterval = 1000;
+      UI.build(configs);
+
+      // sacrifice garden
+      const oldConvert = Garden.minigame.convert;
+      Garden.minigame.convert = () => {
+        UI.labelToggleState('plotIsSaved', false);
+        this.handleToggle('autoHarvest');
+        this.handleToggle('autoPlant');
+        Game.WriteSave();
+        oldConvert();
+      };
+
+      this.start();
+    }
+
+    static start() {
+      this.timerId = window.setInterval(() => Garden.run(configs), this.timerInterval);
+    }
+
+    static stop() {
+      window.clearInterval(this.timerId);
+    }
+
+    static handleChange(key, value) {
+      if (value === defaultConfigs[key].value) {
+        delete changedConfigs[key];
+        configs[key].value = defaultConfigs[key].value;
+      } else {
+        changedConfigs[key].value = value;
+      }
+      Game.WriteSave();
+    }
+
+    static handleToggle(key) {
+      const newValue = !configs[key];
+      console.log(key);
+      console.log(configs[key]);
+      console.log(newValue);
+      console.log(defaultConfigs[key]);
+      if (newValue === defaultConfigs[key]) {
+        delete changedConfigs[key];
+        configs[key] = defaultConfigs[key];
+      } else {
+        changedConfigs[key] = newValue;
+      }
+      Game.WriteSave();
+      UI.toggleButton(key);
+    }
+
+    static handleClick(key) {
+      if (key === 'fillGardenWithSelectedSeed') {
+        Garden.fillGardenWithSelectedSeed();
+      } else if (key === 'savePlot') {
+        Object.assign(changedConfigs, {savedPlot: Garden.clonePlot()});
+        UI.labelToggleState('plotIsSaved', true);
+      }
+      Game.WriteSave();
+    }
+
+    static handleMouseoutPlotIsSaved(element) {
+      Game.tooltip.shouldHide = 1;
+    }
+
+    static handleMouseoverPlotIsSaved(element) {
+      if (configs.savedPlot.length > 0) {
+        const content = UI.buildSavedPlot(configs.savedPlot);
+        Game.tooltip.draw(element, window.escape(content));
+      }
+    }
+  }
+
+  class Garden {
+    static get minigame() {
+      return Game.Objects.Farm.minigame;
+    }
+
+    static get isActive() {
+      return this.minigame !== undefined;
+    }
+
+    static get CpSMult() {
+      let res = 1;
+      // eslint-disable-next-line no-restricted-syntax
+      for (const key in Game.buffs) {
+        if (typeof Game.buffs[key].multCpS !== 'undefined') {
+          res *= Game.buffs[key].multCpS;
+        }
+      }
+      return res;
+    }
+
+    static get secondsBeforeNextTick() {
+      return (this.minigame.nextStep - Date.now()) / 1000;
+    }
+
+    static hasHarvestBenefit(plant) {
+      return typeof plant.onHarvest === 'function';
+    }
+
+    static get selectedSeed() {
+      return this.minigame.seedSelected;
+    }
+
+    static set selectedSeed(seedId) {
+      this.minigame.seedSelected = seedId;
+    }
+
+    static clonePlot() {
+      const plot = clone(this.minigame.plot);
+      for (let x = 0; x < 6; x++) {
+        for (let y = 0; y < 6; y++) {
+          // eslint-disable-next-line prefer-destructuring
+          plot[x][y] = this.minigame.plot[x][y][0];
+
+          const seedId = plot[x][y];
+          if (this.getPlant(seedId) && !plant.plantable) {
+            plot[x][y] = 0;
           }
         }
-        return res;
       }
+      return plot;
+    }
 
-      static
-      get secondsBeforeNextTick() {
-        return (this.minigame.nextStep - Date.now()) / 1000;
+    static getPlant(id) {
+      return this.minigame.plantsById[id - 1];
+    }
+
+    static getTile(x, y) {
+      const tile = this.minigame.getTile(x, y);
+      return {seedId: tile[0], age: tile[1]};
+    }
+
+    static getPlantStage(tile) {
+      const plant = this.getPlant(tile.seedId);
+      if (tile.age < plant.mature) {
+        return 'young';
       }
-
-      static hasHarvestBenefit(plant) {
-        return typeof plant.onHarvest === 'function';
+      if (tile.age + Math.ceil(plant.ageTick + plant.ageTickR) < 100) {
+        return 'mature';
       }
+      return 'dying';
+    }
 
-      static
-      get selectedSeed() {
-        return this.minigame.seedSelected;
+    static tileIsEmpty(x, y) {
+      return this.getTile(x, y).seedId === 0;
+    }
+
+    static plantSeed(seedId, x, y) {
+      const plant = this.getPlant(seedId + 1);
+      if (plant.plantable) {
+        this.minigame.useTool(seedId, x, y);
       }
+    }
 
-      static
-      set selectedSeed(seedId) {
-        this.minigame.seedSelected = seedId;
-      }
-
-      static clonePlot() {
-        const plot = clone(this.minigame.plot);
-        for (let x = 0; x < 6; x++) {
-          for (let y = 0; y < 6; y++) {
-            // eslint-disable-next-line prefer-destructuring
-            plot[x][y] = this.minigame.plot[x][y][0];
-
-            const seedId = plot[x][y];
-            if (this.getPlant(seedId) && !plant.plantable) {
-              plot[x][y] = 0;
-            }
-          }
-        }
-        return plot;
-      }
-
-      static getPlant(id) {
-        return this.minigame.plantsById[id - 1];
-      }
-
-      static getTile(x, y) {
-        const tile = this.minigame.getTile(x, y);
-        return {seedId: tile[0], age: tile[1]};
-      }
-
-      static getPlantStage(tile) {
-        const plant = this.getPlant(tile.seedId);
-        if (tile.age < plant.mature) {
-          return 'young';
-        }
-        if (tile.age + Math.ceil(plant.ageTick + plant.ageTickR) < 100) {
-          return 'mature';
-        }
-        return 'dying';
-      }
-
-      static tileIsEmpty(x, y) {
-        return this.getTile(x, y).seedId === 0;
-      }
-
-      static plantSeed(seedId, x, y) {
-        const plant = this.getPlant(seedId + 1);
-        if (plant.plantable) {
-          this.minigame.useTool(seedId, x, y);
-        }
-      }
-
-      static forEachTile(callback) {
-        for (let x = 0; x < 6; x++) {
-          for (let y = 0; y < 6; y++) {
-            if (this.minigame.isTileUnlocked(x, y)) {
-              callback(x, y);
-            }
+    static forEachTile(callback) {
+      for (let x = 0; x < 6; x++) {
+        for (let y = 0; y < 6; y++) {
+          if (this.minigame.isTileUnlocked(x, y)) {
+            callback(x, y);
           }
         }
       }
+    }
 
-      static harvest(x, y) {
-        this.minigame.harvest(x, y);
-      }
+    static harvest(x, y) {
+      this.minigame.harvest(x, y);
+    }
 
-      static fillGardenWithSelectedSeed() {
-        if (this.selectedSeed > -1) {
-          this.forEachTile((x, y) => {
-            if (this.tileIsEmpty(x, y)) {
-              this.plantSeed(this.selectedSeed, x, y);
-            }
-          });
-        }
-      }
-
-      static handleYoung(config, plant, x, y) {
-        if (!plant.unlocked && config.autoHarvestNewSeeds) {
-          return;
-        }
-
-        if (plant.weed && config.autoHarvestWeeds) {
-          this.harvest(x, y);
-        }
-        let seedId = config.savedPlot.length > 0 ? config.savedPlot[y][x] : [0, 0];
-        seedId -= 1;
-        if (
-          config.autoHarvestCleanGarden &&
-          ((plant.unlocked && seedId === -1) || (seedId > -1 && seedId !== plant.id)) &&
-          plant.plantable
-        ) {
-          this.harvest(x, y);
-        }
-      }
-
-      static handleMature(config, plant, x, y) {
-        if (config.autoHarvestAllMature) {
-          this.harvest(x, y);
-        } else if (!plant.unlocked && config.autoHarvestNewSeeds) {
-          this.harvest(x, y);
-        } else if (
-          config.autoHarvestCheckCpSMult &&
-          this.hasHarvestBenefit(plant) &&
-          this.CpSMult >= config.autoHarvestMiniCpSMult.value
-        ) {
-          this.harvest(x, y);
-        }
-      }
-
-      static handleDying(config, plant, x, y) {
-        if (config.autoHarvestAllMature) {
-          this.harvest(x, y);
-        } else if (config.autoHarvestCheckCpSMultDying && this.CpSMult >= config.autoHarvestMiniCpSMultDying.value) {
-          this.harvest(x, y);
-        } else if (config.autoHarvestDying && this.secondsBeforeNextTick <= config.autoHarvestDyingSeconds) {
-          this.harvest(x, y);
-        }
-      }
-
-      static run(config) {
+    static fillGardenWithSelectedSeed() {
+      if (this.selectedSeed > -1) {
         this.forEachTile((x, y) => {
-          if (config.autoHarvest && !this.tileIsEmpty(x, y)) {
-            const tile = this.getTile(x, y);
-            const plant = this.getPlant(tile.seedId);
-
-            if (plant.immortal && config.autoHarvestAvoidImmortals) {
-              // do nothing
-            } else {
-              const stage = this.getPlantStage(tile);
-              switch (stage) {
-                case 'young':
-                  this.handleYoung(config, plant, x, y);
-                  break;
-                case 'mature':
-                  this.handleMature(config, plant, x, y);
-                  break;
-                case 'dying':
-                  this.handleDying(config, plant, x, y);
-                  break;
-                default:
-                  console.log(`Unexpected plant stage: ${stage}`);
-              }
-            }
-          }
-
-          if (
-            config.autoPlant &&
-            (!config.autoPlantCheckCpSMult || this.CpSMult <= config.autoPlantMaxiCpSMult.value) &&
-            this.tileIsEmpty(x, y) &&
-            config.savedPlot.length > 0
-          ) {
-            const seedId = config.savedPlot[y][x];
-            if (seedId > 0) {
-              this.plantSeed(seedId - 1, x, y);
-            }
+          if (this.tileIsEmpty(x, y)) {
+            this.plantSeed(this.selectedSeed, x, y);
           }
         });
       }
     }
 
-    class UI {
-      static makeId(id) {
-        return moduleName + capitalize(id);
+    static handleYoung(config, plant, x, y) {
+      if (!plant.unlocked && config.autoHarvestNewSeeds) {
+        return;
       }
 
-      static get css() {
-        return `
-          #game.onMenu #${moduleName} {
+      if (plant.weed && config.autoHarvestWeeds) {
+        this.harvest(x, y);
+      }
+      let seedId = config.savedPlot.length > 0 ? config.savedPlot[y][x] : [0, 0];
+      seedId -= 1;
+      if (
+        config.autoHarvestCleanGarden &&
+        ((plant.unlocked && seedId === -1) || (seedId > -1 && seedId !== plant.id)) &&
+        plant.plantable
+      ) {
+        this.harvest(x, y);
+      }
+    }
+
+    static handleMature(config, plant, x, y) {
+      if (config.autoHarvestAllMature) {
+        this.harvest(x, y);
+      } else if (!plant.unlocked && config.autoHarvestNewSeeds) {
+        this.harvest(x, y);
+      } else if (
+        config.autoHarvestCheckCpSMult &&
+        this.hasHarvestBenefit(plant) &&
+        this.CpSMult >= config.autoHarvestMiniCpSMult.value
+      ) {
+        this.harvest(x, y);
+      }
+    }
+
+    static handleDying(config, plant, x, y) {
+      if (config.autoHarvestAllMature) {
+        this.harvest(x, y);
+      } else if (config.autoHarvestCheckCpSMultDying && this.CpSMult >= config.autoHarvestMiniCpSMultDying.value) {
+        this.harvest(x, y);
+      } else if (config.autoHarvestDying && this.secondsBeforeNextTick <= config.autoHarvestDyingSeconds) {
+        this.harvest(x, y);
+      }
+    }
+
+    static run(config) {
+      this.forEachTile((x, y) => {
+        if (config.autoHarvest && !this.tileIsEmpty(x, y)) {
+          const tile = this.getTile(x, y);
+          const plant = this.getPlant(tile.seedId);
+
+          if (plant.immortal && config.autoHarvestAvoidImmortals) {
+            // do nothing
+          } else {
+            const stage = this.getPlantStage(tile);
+            switch (stage) {
+              case 'young':
+                this.handleYoung(config, plant, x, y);
+                break;
+              case 'mature':
+                this.handleMature(config, plant, x, y);
+                break;
+              case 'dying':
+                this.handleDying(config, plant, x, y);
+                break;
+              default:
+                console.log(`Unexpected plant stage: ${stage}`);
+            }
+          }
+        }
+
+        if (
+          config.autoPlant &&
+          (!config.autoPlantCheckCpSMult || this.CpSMult <= config.autoPlantMaxiCpSMult.value) &&
+          this.tileIsEmpty(x, y) &&
+          config.savedPlot.length > 0
+        ) {
+          const seedId = config.savedPlot[y][x];
+          if (seedId > 0) {
+            this.plantSeed(seedId - 1, x, y);
+          }
+        }
+      });
+    }
+  }
+
+  class UI {
+    static makeId(id) {
+      return moduleToken + capitalize(id);
+    }
+
+    static get css() {
+      return `
+          #game.onMenu #${moduleToken} {
             display: none;
           }
-          #${moduleName} {
+          #${moduleToken} {
             background: #000 url(img/darkNoise.jpg);
             display: none;
             padding: 1em;
             position: inherit;
           }
-          #${moduleName}.visible {
+          #${moduleToken}.visible {
             display: block;
           }
-          #${moduleName}Tools:after {
+          #${moduleToken}Tools:after {
             content: '';
             display: table;
             clear: both;
           }
-          .${moduleName}Panel {
+          .${moduleToken}Panel {
             float: left;
             width: 25%;
           }
-          .${moduleName}BigPanel {
+          .${moduleToken}BigPanel {
             float: left;
             width: 50%;
           }
-          .${moduleName}SubPanel {
+          .${moduleToken}SubPanel {
             float: left;
             width: 50%;
           }
@@ -307,7 +413,7 @@
           #autoPlantPanel a:hover {
             color: #fff;
           }
-          #${moduleName}Title {
+          #${moduleToken}Title {
             color: #808080;
             font-size: 2em;
             font-style: italic;
@@ -315,51 +421,51 @@
             margin-top: -0.5em;
             text-align: center;
           }
-          #${moduleName} h2 {
+          #${moduleToken} h2 {
             font-size: 1.5em;
             line-height: 2em;
           }
-          #${moduleName} h3 {
+          #${moduleToken} h3 {
             color: #d3d3d3;
             font-style: italic;
             line-height: 2em;
           }
-          #${moduleName} p {
+          #${moduleToken} p {
             text-indent: 0;
           }
-          #${moduleName} input[type='number'] {
+          #${moduleToken} input[type='number'] {
             width: 3em;
           }
-          #${moduleName} a.toggleBtn:not(.off) .toggleBtnOff,
-          #${moduleName} a.toggleBtn.off .toggleBtnOn {
+          #${moduleToken} a.toggleBtn:not(.off) .toggleBtnOff,
+          #${moduleToken} a.toggleBtn.off .toggleBtnOn {
             display: none;
           }
-          #${moduleName} span.labelWithState:not(.active) .labelStateActive,
-          #${moduleName} span.labelWithState.active .labelStateNotActive {
+          #${moduleToken} span.labelWithState:not(.active) .labelStateActive,
+          #${moduleToken} span.labelWithState.active .labelStateNotActive {
             display: none;
           }
-          #${moduleName}Tooltip {
+          #${moduleToken}Tooltip {
             width: 300px;
           }
-          #${moduleName}Tooltip .gardenTileRow {
+          #${moduleToken}Tooltip .gardenTileRow {
             height: 48px;
           }
-          #${moduleName}Tooltip .tile {
+          #${moduleToken}Tooltip .tile {
             border: 1px inset #696969;
             display: inline-block;
             height: 48px;
             width: 48px;
           }
-          #${moduleName}Tooltip .gardenTileIcon {
+          #${moduleToken}Tooltip .gardenTileIcon {
             position: inherit;
           }
-          #${moduleName} .warning {
+          #${moduleToken} .warning {
             padding: 1em;
             font-size: 1.5em;
             background-color: #ffa500;
             color: #fff;
           }
-          #${moduleName} .warning .closeWarning {
+          #${moduleToken} .warning .closeWarning {
             font-weight: bold;
             float: right;
             font-size: 2em;
@@ -367,60 +473,60 @@
             cursor: pointer;
             transition: 0.3s;
           }
-          #${moduleName} .warning .closeWarning:hover {
+          #${moduleToken} .warning .closeWarning:hover {
             color: #000;
           }
           `;
-      }
+    }
 
-      static numberInput(name, text, title, options) {
-        const id = this.makeId(name);
-        return `
+    static numberInput(name, text, title, options) {
+      const id = this.makeId(name);
+      return `
           <input type="number" name="${name}" id="${id}" value="${options.value}" step=0.5
             ${options.min !== undefined ? `min="${options.min}"` : ''}
             ${options.max !== undefined ? `max="${options.max}"` : ''}
           />
           <label for="${id}" title="${title}">${text}</label>
           `;
-      }
+    }
 
-      static button(name, text, title, toggle, active) {
-        if (toggle) {
-          return `
+    static button(name, text, title, toggle, active) {
+      if (toggle) {
+        return `
             <a class="toggleBtn option ${active ? '' : 'off'}" name="${name}" id="${this.makeId(name)}" title="${title}">
               ${text}
               <span class="toggleBtnOn">ON</span>
               <span class="toggleBtnOff">OFF</span>
             </a>
             `;
-        }
-        return `<a class="btn option" name="${name}" id="${this.makeId(name)}" title="${title}">${text}</a>`;
       }
+      return `<a class="btn option" name="${name}" id="${this.makeId(name)}" title="${title}">${text}</a>`;
+    }
 
-      static toggleButton(name) {
-        const btn = doc.qSel(`#${moduleName} a.toggleBtn[name=${name}]`);
-        btn.classList.toggle('off');
-      }
+    static toggleButton(name) {
+      const btn = doc.qSel(`#${moduleToken} a.toggleBtn[name=${name}]`);
+      btn.classList.toggle('off');
+    }
 
-      static labelWithState(name, text, textActive, active) {
-        return `
+    static labelWithState(name, text, textActive, active) {
+      return `
           <span name="${name}" id="${this.makeId(name)}" class="labelWithState ${active ? 'active' : ''}"">
             <span class="labelStateActive">${textActive}</span>
             <span class="labelStateNotActive">${text}</span>
           </span>
           `;
-      }
+    }
 
-      static labelToggleState(name, active) {
-        const label = doc.qSel(`#${moduleName} span.labelWithState[name=${name}]`);
-        label.classList.toggle('active', active);
-      }
+    static labelToggleState(name, active) {
+      const label = doc.qSel(`#${moduleToken} span.labelWithState[name=${name}]`);
+      label.classList.toggle('active', active);
+    }
 
-      static createWarning(msg) {
-        doc.elId('row2').insertAdjacentHTML(
-          'beforebegin',
-          `
-            <div id="${moduleName}">
+    static createWarning(msg) {
+      doc.elId('row2').insertAdjacentHTML(
+        'beforebegin',
+        `
+            <div id="${moduleToken}">
               <style>${this.css}</style>
               <div class="warning">
                 <span class="closeWarning">&times;</span>
@@ -428,224 +534,224 @@
               </div>
             </div>
             `,
-        );
-        doc.qSel(`#${moduleName} .closeWarning`).onclick = () => {
-          doc.elId(moduleName).remove();
-        };
-      }
+      );
+      doc.qSel(`#${moduleToken} .closeWarning`).onclick = () => {
+        doc.elId(moduleToken).remove();
+      };
+    }
 
-      static get readmeLink() {
-        return 'https://github.com/yannprada/cookie-garden-helper/blob/master/README.md#how-it-works';
-      }
+    static get readmeLink() {
+      return 'https://github.com/marblenix/cookie-clicker/raw/main/garden-helper/README.md#how-it-works';
+    }
 
-      static build(config) {
-        doc.qSel('#row2 .productButtons').insertAdjacentHTML(
-          'beforeend',
-          `
-            <div id="${moduleName}ProductButton" class="productButton">
-              Cookie Garden Helper
+    static build(config) {
+      doc.qSel('#row2 .productButtons').insertAdjacentHTML(
+        'beforeend',
+        `
+            <div id="${moduleToken}ProductButton" class="productButton">
+              ${moduleName}
             </div>
             `,
-        );
-        doc.elId('row2').insertAdjacentHTML(
-          'beforeend',
-          `
-            <div id="${moduleName}">
+      );
+      doc.elId('row2').insertAdjacentHTML(
+        'beforeend',
+        `
+            <div id="${moduleToken}">
               <style>
                 ${this.css}
               </style>
               <a href="${this.readmeLink}" target="new">how it works</a>
-              <div id="${moduleName}Title" class="title">Cookie Garden Helper</div>
-              <div id="${moduleName}Tools">
-                <div class="${moduleName}BigPanel" id="autoHarvestPanel">
+              <div id="${moduleToken}Title" class="title">${moduleName}</div>
+              <div id="${moduleToken}Tools">
+                <div class="${moduleToken}BigPanel" id="autoHarvestPanel">
                   <h2>Auto-harvest ${this.button('autoHarvest', '', '', true, config.autoHarvest)}</h2>
-                  <div class="${moduleName}SubPanel">
+                  <div class="${moduleToken}SubPanel">
                     <h3>immortal</h3>
                     <p>
                       ${this.button(
-                    'autoHarvestAvoidImmortals',
-                    'Avoid immortals',
-                    'Do not harvest immortal plants',
-                    true,
-                  config.autoHarvestAvoidImmortals,
-                )}
+          'autoHarvestAvoidImmortals',
+          'Avoid immortals',
+          'Do not harvest immortal plants',
+          true,
+          config.autoHarvestAvoidImmortals,
+        )}
                     </p>
                   </div>
-                  <div class="${moduleName}SubPanel">
+                  <div class="${moduleToken}SubPanel">
                     <h3>young</h3>
                     <p>
                       ${this.button(
-                    'autoHarvestWeeds',
-                    'Remove weeds',
-                    'Remove weeds as soon as they appear',
-                    true,
-                  config.autoHarvestWeeds,
-                )}
+          'autoHarvestWeeds',
+          'Remove weeds',
+          'Remove weeds as soon as they appear',
+          true,
+          config.autoHarvestWeeds,
+        )}
                     </p>
                     <p>
                       ${this.button(
-                    'autoHarvestCleanGarden',
-                    'Clean Garden',
-                    'Only allow saved and new/unlocked seeds',
-                    true,
-                  config.autoHarvestCleanGarden,
-                )}
+          'autoHarvestCleanGarden',
+          'Clean Garden',
+          'Only allow saved and new/unlocked seeds',
+          true,
+          config.autoHarvestCleanGarden,
+        )}
                     </p>
                   </div>
-                  <div class="${moduleName}SubPanel">
+                  <div class="${moduleToken}SubPanel">
                     <h3>mature</h3>
                     <p>
                       ${this.button(
-                    'autoHarvestNewSeeds',
-                    'New seeds',
-                    'Harvest new seeds as soon as they are mature',
-                    true,
-                  config.autoHarvestNewSeeds,
-                )}
+          'autoHarvestNewSeeds',
+          'New seeds',
+          'Harvest new seeds as soon as they are mature',
+          true,
+          config.autoHarvestNewSeeds,
+        )}
                     </p>
                     <p>
                       ${this.button(
-                    'autoHarvestAllMature',
-                    'All',
-                    'Harvest all seeds as soon as they are mature',
-                    true,
-                  config.autoHarvestAllMature,
-                )}
+          'autoHarvestAllMature',
+          'All',
+          'Harvest all seeds as soon as they are mature',
+          true,
+          config.autoHarvestAllMature,
+        )}
                     </p>
                     <p>
                       ${this.button(
-                    'autoHarvestCheckCpSMult',
-                    'Check CpS mult',
-                    'Check the CpS multiplier before harvesting (see below)',
-                    true,
-                  config.autoHarvestCheckCpSMult,
-                )}
+          'autoHarvestCheckCpSMult',
+          'Check CpS mult',
+          'Check the CpS multiplier before harvesting (see below)',
+          true,
+          config.autoHarvestCheckCpSMult,
+        )}
                     </p>
                     <p>
                       ${this.numberInput(
-                    'autoHarvestMiniCpSMult',
-                    'Min CpS multiplier',
-                    'Minimum CpS multiplier for the auto-harvest to happen',
-                  config.autoHarvestMiniCpSMult,
-                )}
+          'autoHarvestMiniCpSMult',
+          'Min CpS multiplier',
+          'Minimum CpS multiplier for the auto-harvest to happen',
+          config.autoHarvestMiniCpSMult,
+        )}
                     </p>
                   </div>
-                  <div class="${moduleName}SubPanel">
+                  <div class="${moduleToken}SubPanel">
                     <h3>dying</h3>
                     <p>
                       ${this.button(
-                    'autoHarvestDying',
-                    'Dying plants',
-                    `Harvest dying plants, ${config.autoHarvestDyingSeconds}s before the new tick occurs`,
-                    true,
-                  config.autoHarvestDying,
-                )}
+          'autoHarvestDying',
+          'Dying plants',
+          `Harvest dying plants, ${config.autoHarvestDyingSeconds}s before the new tick occurs`,
+          true,
+          config.autoHarvestDying,
+        )}
                     </p>
                     <p>
                       ${this.button(
-                    'autoHarvestCheckCpSMultDying',
-                    'Check CpS mult',
-                    'Check the CpS multiplier before harvesting (see below)',
-                    true,
-                  config.autoHarvestCheckCpSMultDying,
-                )}
+          'autoHarvestCheckCpSMultDying',
+          'Check CpS mult',
+          'Check the CpS multiplier before harvesting (see below)',
+          true,
+          config.autoHarvestCheckCpSMultDying,
+        )}
                     </p>
                     <p>
                       ${this.numberInput(
-                    'autoHarvestMiniCpSMultDying',
-                    'Min CpS multiplier',
-                    'Minimum CpS multiplier for the auto-harvest to happen',
-                  config.autoHarvestMiniCpSMultDying,
-                )}
+          'autoHarvestMiniCpSMultDying',
+          'Min CpS multiplier',
+          'Minimum CpS multiplier for the auto-harvest to happen',
+          config.autoHarvestMiniCpSMultDying,
+        )}
                     </p>
                   </div>
                 </div>
-                <div class="${moduleName}Panel" id="autoPlantPanel">
+                <div class="${moduleToken}Panel" id="autoPlantPanel">
                   <h2>Auto-plant ${this.button('autoPlant', '', '', true, config.autoPlant)}</h2>
                   <p>
                     ${this.button(
-                    'autoPlantCheckCpSMult',
-                    'Check CpS mult',
-                    'Check the CpS multiplier before planting (see below)',
-                    true,
-                  config.autoPlantCheckCpSMult,
-                )}
+          'autoPlantCheckCpSMult',
+          'Check CpS mult',
+          'Check the CpS multiplier before planting (see below)',
+          true,
+          config.autoPlantCheckCpSMult,
+        )}
                   </p>
                   <p>
                     ${this.numberInput(
-                    'autoPlantMaxiCpSMult',
-                    'Max CpS multiplier',
-                    'Maximum CpS multiplier for the auto-plant to happen',
-                  config.autoPlantMaxiCpSMult,
-                )}
+          'autoPlantMaxiCpSMult',
+          'Max CpS multiplier',
+          'Maximum CpS multiplier for the auto-plant to happen',
+          config.autoPlantMaxiCpSMult,
+        )}
                   </p>
                   <p>
                     ${this.button('savePlot', 'Save plot', 'Save the current plot; these seeds will be replanted later')}
                     ${this.labelWithState('plotIsSaved', 'No saved plot', 'Plot saved', Boolean(config.savedPlot.length))}
                   </p>
                 </div>
-                <div class="${moduleName}Panel" id="manualToolsPanel">
+                <div class="${moduleToken}Panel" id="manualToolsPanel">
                   <h2>Manual tools</h2>
                   <p>
                     ${this.button(
-                    'fillGardenWithSelectedSeed',
-                    'Plant selected seed',
-                    'Plant the selected seed on all empty tiles',
-                )}
+          'fillGardenWithSelectedSeed',
+          'Plant selected seed',
+          'Plant the selected seed on all empty tiles',
+        )}
                   </p>
                 </div>
               </div>
             </div>
             `,
-        );
+      );
 
-        doc.elId(`${moduleName}ProductButton`).onclick = () => {
-          doc.elId(moduleName).classList.toggle('visible');
-        };
+      doc.elId(`${moduleToken}ProductButton`).onclick = () => {
+        doc.elId(moduleToken).classList.toggle('visible');
+      };
 
-        doc.qSelAll(`#${moduleName} input`).forEach(input => {
-          input.onchange = () => {
-            if (input.type === 'number') {
-              const {min} = config[input.name];
-              const {max} = config[input.name];
-              if (min !== undefined && input.value < min) {
-                input.value = min;
-              }
-              if (max !== undefined && input.value > max) {
-                input.value = max;
-              }
-              Main.handleChange(input.name, input.value);
+      doc.qSelAll(`#${moduleToken} input`).forEach(input => {
+        input.onchange = () => {
+          if (input.type === 'number') {
+            const {min} = config[input.name];
+            const {max} = config[input.name];
+            if (min !== undefined && input.value < min) {
+              input.value = min;
             }
-          };
-        });
-
-        doc.qSelAll(`#${moduleName} a.toggleBtn`).forEach(a => {
-          a.onclick = () => {
-            Main.handleToggle(a.name);
-          };
-        });
-
-        doc.qSelAll(`#${moduleName} a.btn`).forEach(a => {
-          a.onclick = () => {
-            Main.handleClick(a.name);
-          };
-        });
-
-        doc.elId(`${moduleName}PlotIsSaved`).onmouseout = () => {
-          Main.handleMouseoutPlotIsSaved(this);
+            if (max !== undefined && input.value > max) {
+              input.value = max;
+            }
+            Main.handleChange(input.name, input.value);
+          }
         };
-        doc.elId(`${moduleName}PlotIsSaved`).onmouseover = () => {
-          Main.handleMouseoverPlotIsSaved(this);
+      });
+
+      doc.qSelAll(`#${moduleToken} a.toggleBtn`).forEach(a => {
+        a.onclick = () => {
+          Main.handleToggle(a.name);
         };
-      }
+      });
 
-      static getSeedIconY(seedId) {
-        return Garden.getPlant(seedId).icon * -48;
-      }
+      doc.qSelAll(`#${moduleToken} a.btn`).forEach(a => {
+        a.onclick = () => {
+          Main.handleClick(a.name);
+        };
+      });
 
-      static buildSavedPlot(savedPlot) {
-        return `
-          <div id="${moduleName}Tooltip">
+      doc.elId(`${moduleToken}PlotIsSaved`).onmouseout = () => {
+        Main.handleMouseoutPlotIsSaved(this);
+      };
+      doc.elId(`${moduleToken}PlotIsSaved`).onmouseover = () => {
+        Main.handleMouseoverPlotIsSaved(this);
+      };
+    }
+
+    static getSeedIconY(seedId) {
+      return Garden.getPlant(seedId).icon * -48;
+    }
+
+    static buildSavedPlot(savedPlot) {
+      return `
+          <div id="${moduleToken}Tooltip">
             ${savedPlot.map(row => `
               <div class="gardenTileRow">
                 ${row.map(tile => `
@@ -654,117 +760,8 @@
                   </div>`,).join('')}
               </div>`,).join('')}
           </div>`;
-      }
-    }
-
-    class Main {
-      static init() {
-        this.timerInterval = 1000;
-        UI.build(configs);
-
-        // sacrifice garden
-        const oldConvert = Garden.minigame.convert;
-        Garden.minigame.convert = () => {
-          UI.labelToggleState('plotIsSaved', false);
-          this.handleToggle('autoHarvest');
-          this.handleToggle('autoPlant');
-          Game.WriteSave();
-          oldConvert();
-        };
-
-        this.start();
-      }
-
-      static start() {
-        this.timerId = window.setInterval(() => Garden.run(configs), this.timerInterval);
-      }
-
-      static stop() {
-        window.clearInterval(this.timerId);
-      }
-
-      static handleChange(key, value) {
-        if (value === defaultConfigs[key].value) {
-          delete changedConfigs[key];
-          configs[key].value = defaultConfigs[key].value;
-        } else {
-          changedConfigs[key].value = value;
-        }
-        Game.WriteSave();
-      }
-
-      static handleToggle(key) {
-        const newValue = !configs[key];
-        console.log(key);
-        console.log(configs[key]);
-        console.log(newValue);
-        console.log(defaultConfigs[key]);
-        if (newValue === defaultConfigs[key]) {
-          delete changedConfigs[key];
-          configs[key] = defaultConfigs[key];
-        } else {
-          changedConfigs[key] = newValue;
-        }
-        Game.WriteSave();
-        UI.toggleButton(key);
-      }
-
-      static handleClick(key) {
-        if (key === 'fillGardenWithSelectedSeed') {
-          Garden.fillGardenWithSelectedSeed();
-        } else if (key === 'savePlot') {
-          Object.assign(changedConfigs, {savedPlot: Garden.clonePlot()});
-          UI.labelToggleState('plotIsSaved', true);
-        }
-        Game.WriteSave();
-      }
-
-      static handleMouseoutPlotIsSaved(element) {
-        Game.tooltip.shouldHide = 1;
-      }
-
-      static handleMouseoverPlotIsSaved(element) {
-        if (configs.savedPlot.length > 0) {
-          const content = UI.buildSavedPlot(configs.savedPlot);
-          Game.tooltip.draw(element, window.escape(content));
-        }
-      }
-    }
-
-    if (Garden.isActive) {
-      Main.init();
-    } else {
-      const msg = "You don't have a garden yet. This mod won't work without it!";
-      console.log(msg);
-      UI.createWarning(msg);
     }
   }
 
-  function init() {
-    Game.registerMod(GM_info.script.name, {
-      init: start,
-      save: () => {
-        Object.assign(configs, changedConfigs);
-        return JSON.stringify(changedConfigs);
-      },
-      load: saveString => {
-        changedConfigs = JSON.parse(saveString);
-        Object.assign(configs, changedConfigs);
-      },
-    });
-  }
-
-  let interval;
-
-  function checkGameState() {
-    if (Game === undefined || !Game.ready) {
-      return false
-    } else {
-      clearInterval(interval);
-      init();
-      return true;
-    }
-  }
-
-  interval = setInterval(checkGameState, 1000);
+  const interval = setInterval(checkGameState, 1000);
 })();

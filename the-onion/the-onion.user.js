@@ -16,12 +16,30 @@
 // @grant        GM_getResourceText
 // ==/UserScript==
 
-(function () {
+(() => {
   'use strict';
 
   let news = [];
 
-  function tickerHook() {
+  const init = () => {
+    Game.registerMod('The Onion', {
+      init: () => {
+        Game.registerHook('ticker', tickerHook)
+      },
+    });
+  };
+
+  const checkGameState = () => {
+    if (Game === undefined || !Game.ready) {
+      return false
+    } else {
+      clearInterval(interval);
+      init();
+      return true;
+    }
+  };
+
+  const tickerHook = () => {
     if (news.length > 0) {
       return news;
     }
@@ -35,27 +53,7 @@
     }
     news = titleStrings
     return news;
-  }
+  };
 
-  function init() {
-    Game.registerMod('The Onion', {
-      init: () => {
-        Game.registerHook('ticker', tickerHook)
-      },
-    });
-  }
-
-  let interval;
-
-  function checkGameState() {
-    if (Game === undefined || !Game.ready) {
-      return false
-    } else {
-      clearInterval(interval);
-      init();
-      return true;
-    }
-  }
-
-  interval = setInterval(checkGameState, 1000);
+  const interval = setInterval(checkGameState, 1000);
 })();
